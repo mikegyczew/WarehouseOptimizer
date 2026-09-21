@@ -1,6 +1,8 @@
 import json
+import hashlib
 import logging
 import os
+import secrets
 import sqlite3
 from datetime import datetime, timezone
 from io import BytesIO
@@ -12,7 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover
     from optimizer.packing import Box, optimize_packing
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook, load_workbook
@@ -36,6 +38,53 @@ class OptimizationRequest(BaseModel):
     room_width: float
     room_height: float
     packages: list[Package]
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    password_confirmation: str
+
+
+class AuthService:
+    SESSION_COOKIE = "warehouse_session"
+    _sessions: dict[str, str] = {}
+
+    @classmethod
+    def login(cls, username: str, password: str) -> str | None:
+        expected_username = os.getenv("WAREHOUSE_ADMIN_USER", "admin")
+        expected_password = os.getenv("WAREHOUSE_ADMIN_PASSWORD", "admin")
+        if secrets.compare_digest(username, expected_username) and secrets.compare_digest(password, expected_password):
+            admin_id = UserService.ensure_user(username, password)
+            OptimizationHistoryService.claim_unowned_runs(admin_id)
+            token = secrets.token_urlsafe(32)
+            cls._sessions[token] = username
+            return token
+
+        if not UserService.authenticate(username, password):
+            return None
+
+        token = secrets.token_urlsafe(32)
+        cls._sessions[token] = username
+        return token
+
+    @classmethod
+    def is_authenticated(cls, token: str | None) -> bool:
+        return bool(token and token in cls._sessions)
+
+    @classmethod
+    def username(cls, token: str | None) -> str | None:
+        return cls._sessions.get(token) if token else None
+
+    @classmethod
+    def logout(cls, token: str | None) -> None:
+        if token:
+            cls._sessions.pop(token, None)
 
 
 class ExcelImportService:
@@ -333,13 +382,20 @@ class OptimizationHistoryService:
                     not_placed_count INTEGER NOT NULL,
                     utilization REAL NOT NULL,
                     request_json TEXT NOT NULL,
-                    result_json TEXT NOT NULL
+                    result_json TEXT NOT NULL,
+                    user_id INTEGER
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(optimization_runs)").fetchall()
+            }
+            if "user_id" not in columns:
+                connection.execute("ALTER TABLE optimization_runs ADD COLUMN user_id INTEGER")
 
     @staticmethod
-    def save_run(request: OptimizationRequest, result: dict) -> int:
+    def save_run(request: OptimizationRequest, result: dict, user_id: int | None = None) -> int:
         OptimizationHistoryService._ensure_schema()
         optimization = result.get("optimization", {})
         payload = request.model_dump()
@@ -358,8 +414,9 @@ class OptimizationHistoryService:
                     not_placed_count,
                     utilization,
                     request_json,
-                    result_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    result_json,
+                    user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created_at,
@@ -372,36 +429,139 @@ class OptimizationHistoryService:
                     float(optimization.get("utilization", 0) or 0),
                     json.dumps(payload),
                     json.dumps(result),
+                    user_id,
                 ),
             )
             return int(cursor.lastrowid)
 
     @staticmethod
-    def list_recent(limit: int = 20) -> list[dict]:
+    def list_recent(limit: int = 20, user_id: int | None = None) -> list[dict]:
         OptimizationHistoryService._ensure_schema()
         with OptimizationHistoryService._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT *
-                FROM optimization_runs
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            if user_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM optimization_runs ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM optimization_runs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (user_id, limit),
+                ).fetchall()
         return [dict(row) for row in rows]
 
     @staticmethod
-    def get_run(run_id: int) -> dict | None:
+    def get_run(run_id: int, user_id: int | None = None) -> dict | None:
         OptimizationHistoryService._ensure_schema()
         with OptimizationHistoryService._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM optimization_runs WHERE id = ?",
-                (run_id,),
-            ).fetchone()
+            if user_id is None:
+                row = connection.execute("SELECT * FROM optimization_runs WHERE id = ?", (run_id,)).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM optimization_runs WHERE id = ? AND user_id = ?",
+                    (run_id, user_id),
+                ).fetchone()
         if row is None:
             return None
         return dict(row)
+
+    @staticmethod
+    def claim_unowned_runs(user_id: int) -> None:
+        OptimizationHistoryService._ensure_schema()
+        with OptimizationHistoryService._connect() as connection:
+            connection.execute(
+                "UPDATE optimization_runs SET user_id = ? WHERE user_id IS NULL",
+                (user_id,),
+            )
+
+
+class UserService:
+    DB_PATH = OptimizationHistoryService.DB_PATH
+    ITERATIONS = 310_000
+
+    @classmethod
+    def _connect(cls) -> sqlite3.Connection:
+        connection = sqlite3.connect(cls.DB_PATH)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    @classmethod
+    def _ensure_schema(cls) -> None:
+        with cls._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+
+    @classmethod
+    def _hash_password(cls, password: str, salt: bytes | None = None) -> str:
+        salt = salt or secrets.token_bytes(16)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            cls.ITERATIONS,
+        )
+        return f"{salt.hex()}${digest.hex()}"
+
+    @classmethod
+    def register(cls, username: str, password: str) -> bool:
+        cls._ensure_schema()
+        with cls._connect() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                    (username, cls._hash_password(password), datetime.now(timezone.utc).isoformat()),
+                )
+            except sqlite3.IntegrityError:
+                return False
+        return True
+
+    @classmethod
+    def authenticate(cls, username: str, password: str) -> bool:
+        cls._ensure_schema()
+        with cls._connect() as connection:
+            row = connection.execute(
+                "SELECT password_hash FROM users WHERE username = ?",
+                (username,),
+            ).fetchone()
+        if row is None:
+            return False
+
+        salt_hex, digest_hex = row["password_hash"].split("$", 1)
+        expected = bytes.fromhex(digest_hex)
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt_hex),
+            cls.ITERATIONS,
+        )
+        return secrets.compare_digest(actual, expected)
+
+    @classmethod
+    def ensure_user(cls, username: str, password: str) -> int:
+        cls._ensure_schema()
+        with cls._connect() as connection:
+            row = connection.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+            if row is not None:
+                return int(row["id"])
+        cls.register(username, password)
+        return cls.get_id(username)
+
+    @classmethod
+    def get_id(cls, username: str) -> int:
+        cls._ensure_schema()
+        with cls._connect() as connection:
+            row = connection.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        if row is None:
+            raise ValueError(f"Nie znaleziono użytkownika: {username}")
+        return int(row["id"])
 
 
 class WarehouseAppFactory:
@@ -425,23 +585,76 @@ class WarehouseAppFactory:
                 context={},
             )
 
+        def require_authentication(request: Request) -> int:
+            token = request.cookies.get(AuthService.SESSION_COOKIE)
+            if not AuthService.is_authenticated(token):
+                raise HTTPException(status_code=401, detail="Wymagane logowanie.")
+            username = AuthService.username(token)
+            if username is None:
+                raise HTTPException(status_code=401, detail="Wymagane logowanie.")
+            return UserService.get_id(username)
+
+        @app.post("/api/login")
+        async def login(data: LoginRequest):
+            token = AuthService.login(data.username, data.password)
+            if token is None:
+                raise HTTPException(status_code=401, detail="Nieprawidłowy login lub hasło.")
+
+            response = JSONResponse({"success": True, "username": data.username})
+            response.set_cookie(
+                AuthService.SESSION_COOKIE,
+                token,
+                httponly=True,
+                samesite="lax",
+                max_age=60 * 60 * 8,
+            )
+            return response
+
+        @app.post("/api/register", status_code=201)
+        async def register(data: RegisterRequest):
+            username = data.username.strip()
+            if len(username) < 3:
+                raise HTTPException(status_code=400, detail="Login musi mieć co najmniej 3 znaki.")
+            if len(data.password) < 8:
+                raise HTTPException(status_code=400, detail="Hasło musi mieć co najmniej 8 znaków.")
+            if data.password != data.password_confirmation:
+                raise HTTPException(status_code=400, detail="Hasła nie są takie same.")
+            if not UserService.register(username, data.password):
+                raise HTTPException(status_code=409, detail="Taki login już istnieje.")
+            return {"success": True}
+
+        @app.post("/api/logout")
+        async def logout(request: Request):
+            AuthService.logout(request.cookies.get(AuthService.SESSION_COOKIE))
+            response = JSONResponse({"success": True})
+            response.delete_cookie(AuthService.SESSION_COOKIE)
+            return response
+
+        @app.get("/api/session")
+        async def session(request: Request):
+            user_id = require_authentication(request)
+            return {"success": True, "user_id": user_id}
+
         @app.get("/api/optimizations")
-        async def list_optimizations(limit: int = 20):
+        async def list_optimizations(request: Request, limit: int = 20):
+            user_id = require_authentication(request)
             logger.info("Requested optimization history with limit=%s", limit)
-            return {"success": True, "items": OptimizationHistoryService.list_recent(limit)}
+            return {"success": True, "items": OptimizationHistoryService.list_recent(limit, user_id)}
 
         @app.get("/api/optimizations/{run_id}")
-        async def get_optimization(run_id: int):
+        async def get_optimization(request: Request, run_id: int):
+            user_id = require_authentication(request)
             logger.info("Requested optimization detail for run_id=%s", run_id)
-            item = OptimizationHistoryService.get_run(run_id)
+            item = OptimizationHistoryService.get_run(run_id, user_id)
             if item is None:
                 raise HTTPException(status_code=404, detail="Nie znaleziono optymalizacji.")
             return {"success": True, "item": item}
 
         @app.get("/api/optimizations/{run_id}/excel")
-        async def export_optimization_excel(run_id: int):
+        async def export_optimization_excel(request: Request, run_id: int):
+            user_id = require_authentication(request)
             logger.info("Exporting optimization Excel for run_id=%s", run_id)
-            item = OptimizationHistoryService.get_run(run_id)
+            item = OptimizationHistoryService.get_run(run_id, user_id)
             if item is None:
                 raise HTTPException(status_code=404, detail="Nie znaleziono optymalizacji.")
 
@@ -453,7 +666,8 @@ class WarehouseAppFactory:
             )
 
         @app.get("/api/excel-template")
-        async def excel_template():
+        async def excel_template(request: Request):
+            require_authentication(request)
             logger.info("Generating Excel template")
             template = ExcelImportService.build_template_workbook()
             return StreamingResponse(
@@ -463,7 +677,8 @@ class WarehouseAppFactory:
             )
 
         @app.post("/api/excel-import")
-        async def excel_import(file: UploadFile = File(...)):
+        async def excel_import(request: Request, file: UploadFile = File(...)):
+            require_authentication(request)
             if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
                 logger.warning("Rejected invalid file upload: %s", file.filename)
                 raise HTTPException(status_code=400, detail="Dozwolone są tylko pliki Excel (.xlsx, .xlsm, .xls).")
@@ -477,7 +692,8 @@ class WarehouseAppFactory:
             return {"success": True, "data": data}
 
         @app.post("/api/optimize")
-        async def optimize(data: OptimizationRequest):
+        async def optimize(request: Request, data: OptimizationRequest):
+            user_id = require_authentication(request)
             logger.info(
                 "Optimization requested: room=%sx%sx%s packages=%s",
                 data.room_length,
@@ -486,7 +702,7 @@ class WarehouseAppFactory:
                 len(data.packages),
             )
             result = OptimizationService.calculate_result(data)
-            run_id = OptimizationHistoryService.save_run(data, result)
+            run_id = OptimizationHistoryService.save_run(data, result, user_id)
             result["run_id"] = run_id
             logger.info("Optimization saved in history with run_id=%s", run_id)
             return result

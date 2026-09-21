@@ -24,17 +24,46 @@ class WarehouseApp {
         this.selectedBox = null;
         this.raycaster = null;
         this.mouse = null;
+        this.authMode = "login";
 
         this.bindGlobalHandlers();
         this.bindWindowEvents();
+        this.bindLoginForm();
         window.addEventListener("load", () => {
-            this.showView("dashboard");
-            this.updateInventory();
-            this.updateRoomSidebar();
-            this.bindFileInput();
-            this.loadOptimizationHistory();
-            this.loadDemo();
+            this.initialize();
         });
+    }
+
+    bindLoginForm() {
+        const form = document.getElementById("loginForm");
+        if (form) {
+            form.addEventListener("submit", (event) => {
+                event.preventDefault();
+                this.login();
+            });
+        }
+    }
+
+    async initialize() {
+        try {
+            const response = await fetch("/api/session");
+            if (response.ok) {
+                this.showAuthenticatedApp();
+            }
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    showAuthenticatedApp() {
+        document.getElementById("loginView")?.classList.add("hidden");
+        document.querySelector(".app-shell")?.classList.remove("hidden");
+        this.showView("dashboard");
+        this.updateInventory();
+        this.updateRoomSidebar();
+        this.bindFileInput();
+        this.loadOptimizationHistory();
+        this.loadDemo();
     }
 
     bindFileInput() {
@@ -63,6 +92,9 @@ class WarehouseApp {
             loadOptimizationHistory: () => this.loadOptimizationHistory(),
             loadSavedOptimization: (runId) => this.loadSavedOptimization(runId),
             downloadSavedOptimization: (runId) => this.downloadSavedOptimization(runId),
+            login: () => this.login(),
+            toggleAuthMode: () => this.toggleAuthMode(),
+            logout: () => this.logout(),
             optimize: () => this.optimize(),
             applyResult: (result) => this.applyResult(result),
             updateUsageCircle: (value) => this.updateUsageCircle(value),
@@ -108,11 +140,72 @@ class WarehouseApp {
         document.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("active"));
 
         const navItems = document.querySelectorAll(".nav-item");
-        const index = { dashboard: 0, warehouse: 1, packages: 2, settings: 3 }[name];
+        const index = { dashboard: 0, warehouse: 1, packages: 2, history: 3, settings: 4 }[name];
 
         if (navItems[index]) {
             navItems[index].classList.add("active");
         }
+    }
+
+    async login() {
+        const form = document.getElementById("loginForm");
+        const errorElement = document.getElementById("loginError");
+        if (!form || !errorElement) return;
+
+        const formData = new FormData(form);
+        errorElement.classList.add("hidden");
+
+        try {
+            const isRegistering = this.authMode === "register";
+            const response = await fetch(isRegistering ? "/api/register" : "/api/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    username: formData.get("username"),
+                    password: formData.get("password"),
+                    password_confirmation: formData.get("password_confirmation"),
+                }),
+            });
+
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({}));
+                throw new Error(body.detail || (isRegistering ? "Nie udało się utworzyć konta." : "Nieprawidłowy login lub hasło."));
+            }
+
+            form.reset();
+            if (isRegistering) {
+                this.toggleAuthMode();
+                errorElement.textContent = "Konto utworzone. Możesz się teraz zalogować.";
+                errorElement.classList.remove("hidden");
+            } else {
+                this.showAuthenticatedApp();
+            }
+        } catch (error) {
+            errorElement.textContent = error.message;
+            errorElement.classList.remove("hidden");
+        }
+    }
+
+    toggleAuthMode() {
+        this.authMode = this.authMode === "login" ? "register" : "login";
+        const isRegistering = this.authMode === "register";
+        const title = document.querySelector("#loginView h1");
+        const description = document.querySelector("#loginView .login-panel p");
+        const submit = document.querySelector("#loginForm .optimize-button");
+        const confirmation = document.getElementById("registerFields");
+        const switchButton = document.getElementById("authModeButton");
+
+        if (title) title.textContent = isRegistering ? "Rejestracja" : "Logowanie";
+        if (description) description.textContent = isRegistering ? "Utwórz lokalne konto do zarządzania magazynem." : "Zaloguj się, aby zarządzać optymalizacjami magazynu.";
+        if (submit) submit.textContent = isRegistering ? "Utwórz konto" : "Zaloguj się";
+        if (confirmation) confirmation.classList.toggle("hidden", !isRegistering);
+        if (switchButton) switchButton.textContent = isRegistering ? "Mam już konto" : "Załóż konto";
+    }
+
+    async logout() {
+        await fetch("/api/logout", { method: "POST" });
+        document.querySelector(".app-shell")?.classList.add("hidden");
+        document.getElementById("loginView")?.classList.remove("hidden");
     }
 
     saveRoom() {

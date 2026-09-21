@@ -220,7 +220,39 @@
 <body>
 
 
-<div class="app-shell">
+<section id="loginView" class="login-view">
+
+    <div class="login-panel">
+        <div class="logo login-logo">
+            <div class="logo-icon">📦</div>
+            <div>
+                <strong>Warehouse</strong>
+                <span>Optimizer</span>
+            </div>
+        </div>
+
+        <div class="panel-label">PANEL ADMINISTRACYJNY</div>
+        <h1>Logowanie</h1>
+        <p>Zaloguj się, aby zarządzać optymalizacjami magazynu.</p>
+
+        <form id="loginForm" class="login-form">
+            <label for="loginUsername">Login</label>
+            <input id="loginUsername" name="username" type="text" autocomplete="username" required>
+            <label for="loginPassword">Hasło</label>
+            <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+            <div id="registerFields" class="hidden">
+                <label for="loginPasswordConfirmation">Powtórz hasło</label>
+                <input id="loginPasswordConfirmation" name="password_confirmation" type="password" autocomplete="new-password">
+            </div>
+            <button class="optimize-button" type="submit">Zaloguj się</button>
+            <div id="loginError" class="login-error hidden"></div>
+            <button id="authModeButton" class="login-switch" type="button" onclick="toggleAuthMode()">Załóż konto</button>
+        </form>
+    </div>
+</section>
+
+
+<div class="app-shell hidden">
 
 
     <!-- =====================================================
@@ -290,6 +322,18 @@
 
             <button
                 class="nav-item"
+                onclick="showView('history')"
+            >
+
+                <span>◷</span>
+
+                Historia
+
+            </button>
+
+
+            <button
+                class="nav-item"
                 onclick="showView('settings')"
             >
 
@@ -321,6 +365,8 @@
                 </div>
 
             </div>
+
+            <button class="logout-button" onclick="logout()">Wyloguj</button>
 
 
             <div class="version">
@@ -1338,6 +1384,45 @@
 
 
         <!-- =================================================
+             HISTORY
+        ================================================== -->
+
+        <section
+            id="historyView"
+            class="view hidden"
+        >
+
+            <div class="page-title">
+                <div>
+                    <div class="panel-label">ARCHIWUM</div>
+                    <h2>Historia optymalizacji</h2>
+                    <p>Przeglądaj, odtwarzaj i eksportuj wykonane obliczenia.</p>
+                </div>
+                <button class="secondary-button" onclick="loadOptimizationHistory()">Odśwież historię</button>
+            </div>
+
+            <div class="panel settings-panel">
+                <div id="historyList" class="history-list"></div>
+
+                <div id="historyDetails" class="history-details hidden">
+                    <div class="history-details-header">
+                        <div>
+                            <div class="panel-label">SZCZEGÓŁY ZAPISU</div>
+                            <h3 id="historyDetailsTitle">—</h3>
+                        </div>
+                        <div class="action-row history-detail-actions">
+                            <button class="secondary-button" onclick="showView('dashboard')">Dashboard</button>
+                            <button class="secondary-button" onclick="downloadSavedOptimization(window.selectedHistoryRunId)">Excel</button>
+                        </div>
+                    </div>
+                    <div id="historyDetailsStats" class="history-details-stats"></div>
+                    <div id="historyDetailsPackages" class="history-details-packages"></div>
+                </div>
+            </div>
+        </section>
+
+
+        <!-- =================================================
              SETTINGS
         ================================================== -->
 
@@ -1369,31 +1454,6 @@
 
 
             <div class="panel settings-panel">
-
-                <div class="setting-row">
-                    <div>
-                        <strong>Historia optymalizacji</strong>
-                        <span>Ostatnie zapisy wykonanych obliczeń.</span>
-                    </div>
-                    <button class="secondary-button" onclick="loadOptimizationHistory()">Odśwież</button>
-                </div>
-
-                <div id="historyList" class="history-list"></div>
-
-                <div id="historyDetails" class="history-details hidden">
-                    <div class="history-details-header">
-                        <div>
-                            <div class="panel-label">SZCZEGÓŁY ZAPISU</div>
-                            <h3 id="historyDetailsTitle">—</h3>
-                        </div>
-                        <div class="action-row history-detail-actions">
-                            <button class="secondary-button" onclick="showView('dashboard')">Dashboard</button>
-                            <button class="secondary-button" onclick="downloadSavedOptimization(window.selectedHistoryRunId)">Excel</button>
-                        </div>
-                    </div>
-                    <div id="historyDetailsStats" class="history-details-stats"></div>
-                    <div id="historyDetailsPackages" class="history-details-packages"></div>
-                </div>
 
                 <div class="setting-row">
 

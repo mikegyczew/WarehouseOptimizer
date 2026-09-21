@@ -102,6 +102,48 @@ def test_history_service_gets_single_run():
     assert item["room_length"] == 300
 
 
+def test_user_service_registers_and_authenticates_local_account(tmp_path):
+    from main import UserService
+
+    original_path = UserService.DB_PATH
+    UserService.DB_PATH = tmp_path / "users.db"
+    try:
+        assert UserService.register("operator", "correct horse battery") is True
+        assert UserService.authenticate("operator", "correct horse battery") is True
+        assert UserService.authenticate("operator", "wrong password") is False
+        assert UserService.register("operator", "another password") is False
+    finally:
+        UserService.DB_PATH = original_path
+
+
+def test_history_is_isolated_by_user(tmp_path):
+    from main import OptimizationHistoryService, OptimizationRequest, Package, UserService
+
+    original_history_path = OptimizationHistoryService.DB_PATH
+    original_user_path = UserService.DB_PATH
+    database_path = tmp_path / "isolated-history.db"
+    OptimizationHistoryService.DB_PATH = database_path
+    UserService.DB_PATH = database_path
+    try:
+        UserService.register("alice", "alice-password")
+        UserService.register("bob", "bob-password")
+        request = OptimizationRequest(
+            room_length=100,
+            room_width=100,
+            room_height=100,
+            packages=[Package(name="A", length=10, width=10, height=10, quantity=1)],
+        )
+        result = {"optimization": {"placed": 1, "not_placed": 0, "utilization": 1}}
+        run_id = OptimizationHistoryService.save_run(request, result, UserService.get_id("alice"))
+
+        assert len(OptimizationHistoryService.list_recent(user_id=UserService.get_id("alice"))) == 1
+        assert OptimizationHistoryService.list_recent(user_id=UserService.get_id("bob")) == []
+        assert OptimizationHistoryService.get_run(run_id, UserService.get_id("bob")) is None
+    finally:
+        OptimizationHistoryService.DB_PATH = original_history_path
+        UserService.DB_PATH = original_user_path
+
+
 def test_excel_export_builds_workbook_for_history_item():
     from main import OptimizationHistoryService, OptimizationRequest, Package
 

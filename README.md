@@ -12,6 +12,13 @@ python -m venv .venv
 
 Open `http://127.0.0.1:8000` in a browser.
 
+Rejestracja użytkowników jest lokalna: konto składa się z loginu i hasła zapisanych w bazie aplikacji. System nie korzysta z Google OAuth, Gmaila ani kontaktów Google. W trybie developerskim dane administracyjne to `admin` / `admin`. Przed wdrożeniem ustaw własne wartości:
+
+```bash
+export WAREHOUSE_ADMIN_USER=warehouse-admin
+export WAREHOUSE_ADMIN_PASSWORD=strong-password
+```
+
 ## Tests
 
 ```bash
