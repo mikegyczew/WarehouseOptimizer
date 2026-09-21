@@ -1,10 +1,15 @@
+import json
+import logging
+import os
+import sqlite3
+from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import Path
+
 try:
     from app.optimizer.packing import Box, optimize_packing
 except ModuleNotFoundError:  # pragma: no cover
     from optimizer.packing import Box, optimize_packing
-
-from io import BytesIO
-from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -12,6 +17,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook, load_workbook
 from pydantic import BaseModel
+
+logger = logging.getLogger("warehouse_optimizer")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 class Package(BaseModel):
@@ -154,6 +163,83 @@ class ExcelImportService:
         }
 
 
+class ExcelExportService:
+    @staticmethod
+    def build_run_workbook(item: dict) -> Workbook:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Optimization"
+
+        request = json.loads(item.get("request_json") or "{}")
+        result = json.loads(item.get("result_json") or "{}")
+        placed_boxes = result.get("placed_boxes") or []
+        packages = request.get("packages") or []
+
+        metadata = [
+            ["Run ID", item.get("id")],
+            ["Created at", item.get("created_at")],
+            ["room_length", item.get("room_length")],
+            ["room_width", item.get("room_width")],
+            ["room_height", item.get("room_height")],
+            ["package_count", item.get("package_count")],
+            ["placed_count", item.get("placed_count")],
+            ["not_placed_count", item.get("not_placed_count")],
+            ["utilization", item.get("utilization")],
+        ]
+        for row in metadata:
+            sheet.append(row)
+
+        sheet.append([])
+        sheet.append(["request", "value"])
+        sheet.append(["room_length", request.get("room_length")])
+        sheet.append(["room_width", request.get("room_width")])
+        sheet.append(["room_height", request.get("room_height")])
+
+        sheet.append([])
+        sheet.append(["name", "length", "width", "height", "quantity"])
+        for package in packages:
+            sheet.append([
+                package.get("name", ""),
+                package.get("length", 0),
+                package.get("width", 0),
+                package.get("height", 0),
+                package.get("quantity", 1),
+            ])
+
+        sheet.append([])
+        sheet.append(["Optimization summary", ""])
+        sheet.append(["placed", result.get("optimization", {}).get("placed")])
+        sheet.append(["not_placed", result.get("optimization", {}).get("not_placed")])
+        sheet.append(["utilization", result.get("optimization", {}).get("utilization")])
+
+        sheet.append([])
+        sheet.append(["name", "length", "width", "height", "x", "y", "z"])
+        for box in placed_boxes:
+            sheet.append([
+                box.get("name", ""),
+                box.get("length", 0),
+                box.get("width", 0),
+                box.get("height", 0),
+                box.get("x", 0),
+                box.get("y", 0),
+                box.get("z", 0),
+            ])
+
+        for column_cells in sheet.columns:
+            max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
+            sheet.column_dimensions[column_cells[0].column_letter].width = max_length + 2
+
+        return workbook
+
+    @staticmethod
+    def build_run_buffer(item: dict) -> BytesIO:
+        workbook = ExcelExportService.build_run_workbook(item)
+        buffer = BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)
+        return buffer
+
+
 class OptimizationService:
     @staticmethod
     def build_boxes(packages: list[Package]) -> list[Box]:
@@ -217,6 +303,107 @@ class OptimizationService:
         }
 
 
+class OptimizationHistoryService:
+    DB_PATH = Path(
+        os.getenv(
+            "WAREHOUSE_DB_PATH",
+            str(Path(__file__).resolve().parent / "warehouse_history.db"),
+        )
+    )
+
+    @staticmethod
+    def _connect() -> sqlite3.Connection:
+        connection = sqlite3.connect(OptimizationHistoryService.DB_PATH)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    @staticmethod
+    def _ensure_schema() -> None:
+        with OptimizationHistoryService._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS optimization_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    room_length REAL NOT NULL,
+                    room_width REAL NOT NULL,
+                    room_height REAL NOT NULL,
+                    package_count INTEGER NOT NULL,
+                    placed_count INTEGER NOT NULL,
+                    not_placed_count INTEGER NOT NULL,
+                    utilization REAL NOT NULL,
+                    request_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL
+                )
+                """
+            )
+
+    @staticmethod
+    def save_run(request: OptimizationRequest, result: dict) -> int:
+        OptimizationHistoryService._ensure_schema()
+        optimization = result.get("optimization", {})
+        payload = request.model_dump()
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        with OptimizationHistoryService._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO optimization_runs (
+                    created_at,
+                    room_length,
+                    room_width,
+                    room_height,
+                    package_count,
+                    placed_count,
+                    not_placed_count,
+                    utilization,
+                    request_json,
+                    result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    created_at,
+                    request.room_length,
+                    request.room_width,
+                    request.room_height,
+                    len(request.packages),
+                    optimization.get("placed", 0),
+                    optimization.get("not_placed", 0),
+                    float(optimization.get("utilization", 0) or 0),
+                    json.dumps(payload),
+                    json.dumps(result),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    @staticmethod
+    def list_recent(limit: int = 20) -> list[dict]:
+        OptimizationHistoryService._ensure_schema()
+        with OptimizationHistoryService._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM optimization_runs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def get_run(run_id: int) -> dict | None:
+        OptimizationHistoryService._ensure_schema()
+        with OptimizationHistoryService._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM optimization_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+
 class WarehouseAppFactory:
     @staticmethod
     def create_app() -> FastAPI:
@@ -238,8 +425,36 @@ class WarehouseAppFactory:
                 context={},
             )
 
+        @app.get("/api/optimizations")
+        async def list_optimizations(limit: int = 20):
+            logger.info("Requested optimization history with limit=%s", limit)
+            return {"success": True, "items": OptimizationHistoryService.list_recent(limit)}
+
+        @app.get("/api/optimizations/{run_id}")
+        async def get_optimization(run_id: int):
+            logger.info("Requested optimization detail for run_id=%s", run_id)
+            item = OptimizationHistoryService.get_run(run_id)
+            if item is None:
+                raise HTTPException(status_code=404, detail="Nie znaleziono optymalizacji.")
+            return {"success": True, "item": item}
+
+        @app.get("/api/optimizations/{run_id}/excel")
+        async def export_optimization_excel(run_id: int):
+            logger.info("Exporting optimization Excel for run_id=%s", run_id)
+            item = OptimizationHistoryService.get_run(run_id)
+            if item is None:
+                raise HTTPException(status_code=404, detail="Nie znaleziono optymalizacji.")
+
+            workbook = ExcelExportService.build_run_buffer(item)
+            return StreamingResponse(
+                workbook,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f'attachment; filename="optimization_run_{run_id}.xlsx"'},
+            )
+
         @app.get("/api/excel-template")
         async def excel_template():
+            logger.info("Generating Excel template")
             template = ExcelImportService.build_template_workbook()
             return StreamingResponse(
                 template,
@@ -250,16 +465,31 @@ class WarehouseAppFactory:
         @app.post("/api/excel-import")
         async def excel_import(file: UploadFile = File(...)):
             if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
+                logger.warning("Rejected invalid file upload: %s", file.filename)
                 raise HTTPException(status_code=400, detail="Dozwolone są tylko pliki Excel (.xlsx, .xlsm, .xls).")
             try:
+                logger.info("Importing Excel file: %s", file.filename)
                 data = ExcelImportService.parse_excel(await file.read())
+                logger.info("Excel import successful: room=%s x %s x %s, packages=%s", data.get("room_length"), data.get("room_width"), data.get("room_height"), len(data.get("packages", [])))
             except Exception as exc:  # pragma: no cover - runtime validation path
+                logger.exception("Excel import failed for file=%s", file.filename)
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return {"success": True, "data": data}
 
         @app.post("/api/optimize")
         async def optimize(data: OptimizationRequest):
-            return OptimizationService.calculate_result(data)
+            logger.info(
+                "Optimization requested: room=%sx%sx%s packages=%s",
+                data.room_length,
+                data.room_width,
+                data.room_height,
+                len(data.packages),
+            )
+            result = OptimizationService.calculate_result(data)
+            run_id = OptimizationHistoryService.save_run(data, result)
+            result["run_id"] = run_id
+            logger.info("Optimization saved in history with run_id=%s", run_id)
+            return result
 
         return app
 

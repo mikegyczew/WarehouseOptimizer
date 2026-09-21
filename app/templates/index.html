@@ -1370,6 +1370,30 @@
 
             <div class="panel settings-panel">
 
+                <div class="setting-row">
+                    <div>
+                        <strong>Historia optymalizacji</strong>
+                        <span>Ostatnie zapisy wykonanych obliczeń.</span>
+                    </div>
+                    <button class="secondary-button" onclick="loadOptimizationHistory()">Odśwież</button>
+                </div>
+
+                <div id="historyList" class="history-list"></div>
+
+                <div id="historyDetails" class="history-details hidden">
+                    <div class="history-details-header">
+                        <div>
+                            <div class="panel-label">SZCZEGÓŁY ZAPISU</div>
+                            <h3 id="historyDetailsTitle">—</h3>
+                        </div>
+                        <div class="action-row history-detail-actions">
+                            <button class="secondary-button" onclick="showView('dashboard')">Dashboard</button>
+                            <button class="secondary-button" onclick="downloadSavedOptimization(window.selectedHistoryRunId)">Excel</button>
+                        </div>
+                    </div>
+                    <div id="historyDetailsStats" class="history-details-stats"></div>
+                    <div id="historyDetailsPackages" class="history-details-packages"></div>
+                </div>
 
                 <div class="setting-row">
 

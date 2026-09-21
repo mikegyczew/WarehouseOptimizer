@@ -32,6 +32,7 @@ class WarehouseApp {
             this.updateInventory();
             this.updateRoomSidebar();
             this.bindFileInput();
+            this.loadOptimizationHistory();
             this.loadDemo();
         });
     }
@@ -59,6 +60,9 @@ class WarehouseApp {
             updatePackageNumbers: () => this.updatePackageNumbers(),
             updateInventory: () => this.updateInventory(),
             updateDashboard: () => this.updateDashboard(),
+            loadOptimizationHistory: () => this.loadOptimizationHistory(),
+            loadSavedOptimization: (runId) => this.loadSavedOptimization(runId),
+            downloadSavedOptimization: (runId) => this.downloadSavedOptimization(runId),
             optimize: () => this.optimize(),
             applyResult: (result) => this.applyResult(result),
             updateUsageCircle: (value) => this.updateUsageCircle(value),
@@ -234,6 +238,121 @@ class WarehouseApp {
         const volume = (length * width * height) / 1000000;
 
         document.getElementById("dashboardRoom").textContent = volume ? `${volume.toFixed(2)} m³` : "0 m³";
+    }
+
+    async loadOptimizationHistory() {
+        try {
+            const response = await fetch("/api/optimizations?limit=10");
+            if (!response.ok) {
+                throw new Error("Nie udało się pobrać historii.");
+            }
+
+            const result = await response.json();
+            const list = document.getElementById("historyList");
+            if (!list) return;
+
+            const items = result.items || [];
+            if (!items.length) {
+                list.innerHTML = '<div class="history-empty">Brak zapisanych optymalizacji.</div>';
+                return;
+            }
+
+            list.innerHTML = items.map((item) => `
+                <div class="history-item" data-run-id="${item.id}" onclick="loadSavedOptimization(${item.id})">
+                    <div class="history-meta">
+                        <strong>#${item.id}</strong>
+                        <span>${new Date(item.created_at).toLocaleString("pl-PL")}</span>
+                    </div>
+                    <div class="history-stats">
+                        <span>${item.room_length}x${item.room_width}x${item.room_height} cm</span>
+                        <span>${item.placed_count} / ${item.package_count}</span>
+                        <span>${Number(item.utilization).toFixed(1)}% użycia</span>
+                    </div>
+                    <button class="history-export-button" onclick="event.stopPropagation(); downloadSavedOptimization(${item.id})">Excel</button>
+                </div>
+            `).join("");
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    async downloadSavedOptimization(runId) {
+        try {
+            const response = await fetch(`/api/optimizations/${runId}/excel`);
+            if (!response.ok) {
+                throw new Error("Nie udało się pobrać pliku Excel.");
+            }
+
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `optimization_run_${runId}.xlsx`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error(error);
+            alert(`Nie udało się pobrać pliku Excel:\n\n${error.message}`);
+        }
+    }
+
+    async loadSavedOptimization(runId) {
+        try {
+            const response = await fetch(`/api/optimizations/${runId}`);
+            if (!response.ok) throw new Error("Nie udało się pobrać szczegółów optymalizacji.");
+
+            const { item } = await response.json();
+            const result = JSON.parse(item.result_json || "{}") || {};
+            const request = JSON.parse(item.request_json || "{}") || {};
+
+            window.selectedHistoryRunId = runId;
+            this.renderHistoryDetails(item, result, request);
+
+            if (request.room_length && request.room_width && request.room_height) {
+                document.getElementById("roomLength").value = request.room_length;
+                document.getElementById("roomWidth").value = request.room_width;
+                document.getElementById("roomHeight").value = request.room_height;
+            }
+
+            this.currentResult = result;
+            this.applyResult(result);
+            this.updateRoomSidebar();
+            this.updateDashboard();
+            this.showView("settings");
+        } catch (error) {
+            console.error(error);
+            alert(`Nie udało się wczytać zapisu historii:\n\n${error.message}`);
+        }
+    }
+
+    renderHistoryDetails(item, result, request) {
+        const details = document.getElementById("historyDetails");
+        const title = document.getElementById("historyDetailsTitle");
+        const stats = document.getElementById("historyDetailsStats");
+        const packages = document.getElementById("historyDetailsPackages");
+        if (!details || !title || !stats || !packages) return;
+
+        const optimization = result.optimization || {};
+        const packageRows = request.packages || [];
+        title.textContent = `Optymalizacja #${item.id}`;
+        stats.innerHTML = `
+            <span><strong>Magazyn</strong>${item.room_length} × ${item.room_width} × ${item.room_height} cm</span>
+            <span><strong>Wynik</strong>${optimization.placed || 0} / ${item.package_count} szt.</span>
+            <span><strong>Wykorzystanie</strong>${Number(optimization.utilization || 0).toFixed(1)}%</span>
+            <span><strong>Data</strong>${new Date(item.created_at).toLocaleString("pl-PL")}</span>
+        `;
+        packages.innerHTML = `
+            <div class="history-details-label">Towary w zleceniu</div>
+            ${packageRows.length ? packageRows.map((packageItem) => `
+                <div class="history-package-row">
+                    <span>${packageItem.name || "Bez nazwy"}</span>
+                    <span>${packageItem.length} × ${packageItem.width} × ${packageItem.height} cm · ${packageItem.quantity} szt.</span>
+                </div>
+            `).join("") : '<div class="history-empty">Brak danych towarów.</div>'}
+        `;
+        details.classList.remove("hidden");
     }
 
     async optimize() {
